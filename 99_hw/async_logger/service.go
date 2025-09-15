@@ -766,17 +766,32 @@ type Server struct {
 	byConsumer map[string]uint64
 }
 
+func CheckCtx(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", status.Errorf(codes.Unauthenticated, "missing metadata")
+	}
+
+	consumers := md.Get("consumer")
+	if len(consumers) == 0 {
+		return "", status.Errorf(codes.Unauthenticated, "missing consumer")
+	}
+
+	consumer := consumers[0]
+	return consumer, nil
+}
+
 func (s *Server) isAllowedMethod(consumer, method string) (bool, bool) {
 	allowedMethods, ok := s.acl[consumer]
 	if !ok {
-		return false, false // consumer unknown -> unauthenticated
+		return false, false
 	}
 
 	for _, am := range allowedMethods {
 		if am == method {
 			return true, true
 		}
-		// support wildcard like "/main.Biz/*"
+
 		if strings.HasSuffix(am, "/*") {
 			prefix := strings.TrimSuffix(am, "*")
 			if strings.HasPrefix(method, prefix) {
@@ -784,7 +799,7 @@ func (s *Server) isAllowedMethod(consumer, method string) (bool, bool) {
 			}
 		}
 	}
-	return false, true // consumer exists, method not allowed
+	return false, true
 }
 
 func (s *Server) MakeEvent(ctx context.Context, consumer, method string) *Event {
@@ -804,16 +819,10 @@ func (s *Server) MakeEvent(ctx context.Context, consumer, method string) *Event 
 }
 
 func (s *Server) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
+	consumer, err := CheckCtx(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	consumers := md.Get("consumer")
-	if len(consumers) == 0 {
-		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
-	}
-	consumer := consumers[0]
 
 	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Check")
 	if !exists || !allowed {
@@ -834,16 +843,10 @@ func (s *Server) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
 }
 
 func (s *Server) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
+	consumer, err := CheckCtx(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	consumers := md.Get("consumer")
-	if len(consumers) == 0 {
-		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
-	}
-	consumer := consumers[0]
 
 	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Add") // <- тут Add
 	if !exists || !allowed {
@@ -864,16 +867,10 @@ func (s *Server) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
 }
 
 func (s *Server) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
+	consumer, err := CheckCtx(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	consumers := md.Get("consumer")
-	if len(consumers) == 0 {
-		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
-	}
-	consumer := consumers[0]
 
 	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Test") // <- тут Test
 	if !exists || !allowed {
@@ -894,6 +891,16 @@ func (s *Server) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
 }
 
 func (s *Server) Logging(in *Nothing, stream Admin_LoggingServer) error {
+	consumer, err := CheckCtx(stream.Context())
+	if err != nil {
+		return err
+	}
+
+	allowed, exists := s.isAllowedMethod(consumer, "/main.Admin/Logging")
+	if !exists || !allowed {
+		return status.Errorf(codes.Unauthenticated, "missing consumer")
+	}
+
 	ch := make(chan *Event, 1000)
 	defer close(ch)
 
@@ -922,6 +929,16 @@ func copyMap(m map[string]uint64) map[string]uint64 {
 }
 
 func (s *Server) Statistics(in *StatInterval, stream Admin_StatisticsServer) error {
+	consumer, err := CheckCtx(stream.Context())
+	if err != nil {
+		return err
+	}
+
+	allowed, exists := s.isAllowedMethod(consumer, "/main.Admin/Statistics")
+	if !exists || !allowed {
+		return status.Errorf(codes.Unauthenticated, "missing consumer")
+	}
+
 	t := time.NewTicker(time.Duration(in.IntervalSeconds) * time.Second)
 	defer t.Stop()
 
