@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	reflect "reflect"
+	"strings"
 	sync "sync"
 	"time"
 
@@ -765,19 +766,25 @@ type Server struct {
 	byConsumer map[string]uint64
 }
 
-func (s *Server) isAllowedMethod(consumer, method string) bool {
-	AllowedMethods, ok := s.acl[consumer]
+func (s *Server) isAllowedMethod(consumer, method string) (bool, bool) {
+	allowedMethods, ok := s.acl[consumer]
 	if !ok {
-		return false
+		return false, false // consumer unknown -> unauthenticated
 	}
 
-	for _, AllowedMethod := range AllowedMethods {
-		if AllowedMethod == method {
-			return true
+	for _, am := range allowedMethods {
+		if am == method {
+			return true, true
+		}
+		// support wildcard like "/main.Biz/*"
+		if strings.HasSuffix(am, "/*") {
+			prefix := strings.TrimSuffix(am, "*")
+			if strings.HasPrefix(method, prefix) {
+				return true, true
+			}
 		}
 	}
-
-	return false
+	return false, true // consumer exists, method not allowed
 }
 
 func (s *Server) MakeEvent(ctx context.Context, consumer, method string) *Event {
@@ -799,7 +806,7 @@ func (s *Server) MakeEvent(ctx context.Context, consumer, method string) *Event 
 func (s *Server) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, grpc.Errorf(codes.Unauthenticated, "missing metadata")
+		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
 	}
 
 	consumers := md.Get("consumer")
@@ -808,17 +815,15 @@ func (s *Server) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
 	}
 	consumer := consumers[0]
 
-	if !s.isAllowedMethod(consumer, "/main.Biz/Check") {
-		return nil, grpc.Errorf(codes.PermissionDenied, "permission denied")
+	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Check")
+	if !exists || !allowed {
+		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
 	}
 
 	s.mu.Lock()
 	evt := s.MakeEvent(ctx, consumer, "/main.Biz/Check")
 	for _, sub := range s.logSubs {
-		select {
-		case sub <- evt:
-		default:
-		}
+		sub <- evt
 	}
 
 	s.byMethod[evt.Method]++
@@ -831,7 +836,7 @@ func (s *Server) Check(ctx context.Context, in *Nothing) (*Nothing, error) {
 func (s *Server) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, grpc.Errorf(codes.Unauthenticated, "missing metadata")
+		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
 	}
 
 	consumers := md.Get("consumer")
@@ -840,17 +845,15 @@ func (s *Server) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
 	}
 	consumer := consumers[0]
 
-	if !s.isAllowedMethod(consumer, "/main.Biz/Add") {
-		return nil, grpc.Errorf(codes.PermissionDenied, "permission denied")
+	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Add") // <- тут Add
+	if !exists || !allowed {
+		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
 	}
 
 	s.mu.Lock()
 	evt := s.MakeEvent(ctx, consumer, "/main.Biz/Add")
 	for _, sub := range s.logSubs {
-		select {
-		case sub <- evt:
-		default:
-		}
+		sub <- evt
 	}
 
 	s.byMethod[evt.Method]++
@@ -863,7 +866,7 @@ func (s *Server) Add(ctx context.Context, in *Nothing) (*Nothing, error) {
 func (s *Server) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return nil, grpc.Errorf(codes.Unauthenticated, "missing metadata")
+		return nil, status.Errorf(codes.Unauthenticated, "missing metadata")
 	}
 
 	consumers := md.Get("consumer")
@@ -872,17 +875,15 @@ func (s *Server) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
 	}
 	consumer := consumers[0]
 
-	if !s.isAllowedMethod(consumer, "/main.Biz/Test") {
-		return nil, grpc.Errorf(codes.PermissionDenied, "permission denied")
+	allowed, exists := s.isAllowedMethod(consumer, "/main.Biz/Test") // <- тут Test
+	if !exists || !allowed {
+		return nil, status.Errorf(codes.Unauthenticated, "missing consumer")
 	}
 
 	s.mu.Lock()
 	evt := s.MakeEvent(ctx, consumer, "/main.Biz/Test")
 	for _, sub := range s.logSubs {
-		select {
-		case sub <- evt:
-		default:
-		}
+		sub <- evt
 	}
 
 	s.byMethod[evt.Method]++
@@ -893,7 +894,7 @@ func (s *Server) Test(ctx context.Context, in *Nothing) (*Nothing, error) {
 }
 
 func (s *Server) Logging(in *Nothing, stream Admin_LoggingServer) error {
-	ch := make(chan *Event, 10)
+	ch := make(chan *Event, 1000)
 	defer close(ch)
 
 	s.mu.Lock()
@@ -905,7 +906,9 @@ func (s *Server) Logging(in *Nothing, stream Admin_LoggingServer) error {
 		case <-stream.Context().Done():
 			return nil
 		case evt := <-ch:
-			stream.Send(evt)
+			if err := stream.Send(evt); err != nil {
+				return err
+			}
 		}
 	}
 }
